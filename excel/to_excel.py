@@ -1,21 +1,32 @@
 import numpy as np
 import pandas as pd
+import os
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as XLImage
 
 # 参数设置
-distance_file = 'distances_BASF_860_LEVEL1-3.npy'              # 距离信息文件路径
-model_id_file = 'object_indices.npy'              # 模型编号文件路径
-txt_file = 'mesh_index_map.txt'                 # 存放模型名称的txt文件路径
-threshold_distance = 0.03                            # 距离阈值（单位：米，3cm）
-outlier_ratio_threshold = 0.5                        # 异常点比例阈值（大于50%视为异常模型）
+distance_file = '../datas/distances_BASF_860_LEVEL1-3.npy'
+model_id_file = '../datas/object_indices.npy'
+txt_file = '../datas/mesh_index_map.txt'
 
-# 1. 加载 npy 数据
-distances = np.load(distance_file)   # distances: shape (2000,), dtype=float64
-model_ids = np.load(model_id_file)     # model_ids: shape (2000,), dtype=int64
+threshold_distance = 0.03
+outlier_ratio_threshold = 0.5
+base_url = 'https://www.kk.com/searchid=?'            # 模型定位链接的基础部分
+
+error_pointcloud_folder = 'error_pointcloud_images'
+error_model_folder = 'error_model_images'
+comparison_folder = 'comparison_images'
+
+output_excel = 'wrong_models_with_images.xlsx'
+
+# 1. 加载 npy
+distances = np.load(distance_file)
+model_ids = np.load(model_id_file)
 
 if distances.shape[0] != model_ids.shape[0]:
     raise ValueError("距离文件和模型编号文件中的数据数量不一致！")
 
-# 2. 按模型编号分组统计
+# 2. 分组统计
 model_stats = {}
 for distance, mid in zip(distances, model_ids):
     if mid not in model_stats:
@@ -24,39 +35,29 @@ for distance, mid in zip(distances, model_ids):
     if distance > threshold_distance:
         model_stats[mid]["outlier_count"] += 1
 
-# 3. 判断哪些模型错误，并整理输出信息
+# 3. 整理数据
 output_data = []
-wrong_models = []  # 用来存储错误模型的 model id
-
 for mid, stats in model_stats.items():
     total = stats["total"]
     outlier_count = stats["outlier_count"]
     ratio = outlier_count / total
     is_wrong = ratio > outlier_ratio_threshold
+
     model_info = {
         'Model_ID': mid,
         'Total_Points': total,
         'Outlier_Points': outlier_count,
         'Outlier_Ratio': ratio,
-        'Is_Wrong': is_wrong
+        'Is_Wrong': is_wrong,
+        'Threshold': threshold_distance,
+        'Outlier_Ratio_Percentage': ratio * 100,
     }
     output_data.append(model_info)
-    if is_wrong:
-        wrong_models.append(mid)
 
-print('完成统计')
-# 整理所有模型的统计信息为 DataFrame
-df_models = pd.DataFrame(output_data)
-
-# 单独提取错误模型信息
-df_wrong = df_models[df_models['Is_Wrong'] == True]
-
-# 4. 读取 txt 文件，构建序号与模型名称映射字典
-# txt 文件中每行格式：序号 模型名称（中间以空格分隔）
+# 4. 加载txt
 model_name_mapping = {}
 with open(txt_file, 'r', encoding='utf-8') as f:
     for line in f:
-        # 仅以第一个空格切分，剩余部分作为名称（有些名称中可能包含空格）
         parts = line.strip().split(maxsplit=1)
         if len(parts) == 2:
             try:
@@ -64,17 +65,61 @@ with open(txt_file, 'r', encoding='utf-8') as f:
                 model_name = parts[1]
                 model_name_mapping[key] = model_name
             except ValueError:
-                # 如果无法转换为整型则跳过该行
                 continue
 
-# 5. 根据 DataFrame 中的 Model_ID 添加对应模型名称信息
-# 假设 DataFrame 中的 'Model_ID' 和 txt 文件中的序号是对应的
+# 5. 转DataFrame，添加名字和图片路径（先写路径）
+df_models = pd.DataFrame(output_data)
 df_models['Model_Name'] = df_models['Model_ID'].map(model_name_mapping)
-df_wrong['Model_Name'] = df_wrong['Model_ID'].map(model_name_mapping)
 
-# 6. 保存 Excel 文件
-# 保存完整模型统计信息以及错误模型信息
+def get_image_path(folder, model_id):
+    file_path = os.path.join(folder, f'{model_id}.png')
+    if os.path.exists(file_path):
+        return file_path
+    else:
+        return None
+
+df_models['Error_PointCloud_Image'] = df_models['Model_ID'].apply(lambda x: get_image_path(error_pointcloud_folder, x))
+df_models['Error_Model_Image'] = df_models['Model_ID'].apply(lambda x: get_image_path(error_model_folder, x))
+df_models['Comparison_Image'] = df_models['Model_ID'].apply(lambda x: get_image_path(comparison_folder, x))
+
+# 6. 只保留错误模型
+df_wrong = df_models[df_models['Is_Wrong'] == True]
+df_wrong['WrongLocation'] = base_url + df_wrong['Model_Name'].astype(str)
+# 7. 先保存基础信息到Excel（没有图片）
+basic_columns = [
+    'Model_ID', 'Model_Name', 'Total_Points', 'Outlier_Points', 
+    'Outlier_Ratio', 'Outlier_Ratio_Percentage', 'Threshold',
+    'Error_PointCloud_Image', 'Error_Model_Image', 'Comparison_Image', 'WrongLocation'
+]
+df_wrong.to_excel(output_excel, index=False, columns=basic_columns)
+
+# 8. 插入真正的图片到Excel
+wb = load_workbook(output_excel)
+ws = wb.active
+
+# 图片列对应的Excel列
+img_col_mapping = {
+    'Error_PointCloud_Image': 'H',  # Excel列H
+    'Error_Model_Image': 'I',        # Excel列I
+    'Comparison_Image': 'J',         # Excel列J
+}
+
+# 从第二行开始（第一行是表头）
+for idx, row in enumerate(df_wrong.itertuples(), start=2):
+    for col_name, excel_col in img_col_mapping.items():
+        img_path = getattr(row, col_name)
+        if img_path and os.path.exists(img_path):
+            img = XLImage(img_path)
+            # 设置图片大小（可以根据需求调整）
+            img.width = 100
+            img.height = 100
+            cell = f"{excel_col}{idx}"
+            ws.add_image(img, cell)
+
+# 最后保存
+wb.save(output_excel)
+
 df_models.to_excel('models_info.xlsx', index=False)
 df_wrong.to_excel('wrong_models.xlsx', index=False)
 
-print("保存完毕！共判定出 %d 个错误模型。" % len(df_wrong))
+print(f"最终带图片的Excel保存到：{output_excel}")
