@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
 import os
+import argparse
+import requests
+import base64
+import json
+from urllib.parse import quote
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 
@@ -85,11 +90,23 @@ df_models['Comparison_Image'] = df_models['Model_ID'].apply(lambda x: get_image_
 # 6. 只保留错误模型
 df_wrong = df_models[df_models['Is_Wrong'] == True]
 df_wrong['WrongLocation'] = base_url + df_wrong['Model_Name'].astype(str)
+
+# 6+: 生成错误模型的对应链接，放在对应的列上
+def generate_url(value, url_type):
+    parsed_id = quote(value)
+    if url_type == 1:
+        return f"http://localhost:30010/remote/BASF?ID={parsed_id}&Type=Focus"
+    return f"http://localhost:30010/remote/BASF?ID={parsed_id}&Type=GetPicture"
+
+df_wrong['Model_URL'] = df_wrong['Model_Name'].apply(lambda x: generate_url(x, 1))
+df_wrong['Picture_URL'] = df_wrong['Model_Name'].apply(lambda x: generate_url(x, 2))
+
 # 7. 先保存基础信息到Excel（没有图片）
 basic_columns = [
     'Model_ID', 'Model_Name', 'Total_Points', 'Outlier_Points', 
     'Outlier_Ratio', 'Outlier_Ratio_Percentage', 'Threshold',
-    'Error_PointCloud_Image', 'Error_Model_Image', 'Comparison_Image', 'WrongLocation'
+    'Error_PointCloud_Image', 'Error_Model_Image', 'Comparison_Image', 'WrongLocation',
+    'Model_URL', 'Picture_URL',
 ]
 df_wrong.to_excel(output_excel, index=False, columns=basic_columns)
 
@@ -103,6 +120,68 @@ img_col_mapping = {
     'Error_Model_Image': 'I',        # Excel列I
     'Comparison_Image': 'J',         # Excel列J
 }
+
+# 使用脚本从链接获得对应图片
+# def get_error_picture(url, save_dir="pictures"):
+#     saved_files = []
+#     if not os.path.exists(save_dir):
+#         os.makedirs(save_dir)
+#
+#     print(f"正在连接: {url}")
+#     try:
+#         response = requests.get(url, timeout=10)
+#     except requests.RequestException as e:
+#         print(f"请求失败: {e}")
+#         return saved_files
+#
+#     if response.status_code == 200:
+#         try:
+#             data = json.loads(response.content.decode("utf-8"))
+#             key_map = {
+#                 "Picture_All": "picture_all.png",
+#                 "Picture_Model": "picture_model.png",
+#                 "Picture_Cloud": "picture_cloud.png"
+#             }
+#             for key, filename in key_map.items():
+#                 if key in data:
+#                     try:
+#                         # 将图片数据解码并保存
+#                         img_bytes = base64.b64decode(data[key])
+#                         file_path = os.path.join(save_dir, filename)  # 保存路径
+#                         with open(file_path, "wb") as f:
+#                             f.write(img_bytes)
+#                         saved_files.append(file_path)
+#                     except Exception as e:
+#                         print(f"保存图片 {filename} 时出错: {e}")
+#
+#             if saved_files:
+#                 print(f"图片已保存到文件夹: {save_dir}")
+#                 print(f"保存的图片: {', '.join(saved_files)}")
+#             else:
+#                 print("未接收到任何图片数据")
+#         except json.JSONDecodeError:
+#             print("解析响应JSON数据失败，服务器返回的不是有效的JSON格式")
+#             print(f"原始响应: {response.text[:200]}...")
+#     else:
+#         print(f"请求失败，状态码：{response.status_code}")
+#         if response.text:
+#             print(f"响应内容: {response.text}")
+#     return saved_files
+
+# pic_columns = ['H', 'I', 'J']
+# for idx, row in enumerate(df_wrong.itertuples(), start=2):
+#     img_url_path = getattr(row, 'Picture_URL')
+#     if img_url_path:
+#         saved_pics = get_error_picture(img_url_path)
+#         for col, img_path in zip(pic_columns ,saved_pics):
+#             if img_path and os.path.exists(img_path):
+#                 img = XLImage(img_path)
+#                 # 设置图片大小（可以根据需求调整）
+#                 img.width = 100
+#                 img.height = 100
+#                 cell = f"{col}{idx}"
+#                 ws.add_image(img, cell)
+
 
 # 从第二行开始（第一行是表头）
 for idx, row in enumerate(df_wrong.itertuples(), start=2):
